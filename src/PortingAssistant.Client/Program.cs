@@ -15,6 +15,10 @@ using PortingAssistant.Client.Telemetry;
 using System.Diagnostics;
 using System.Reflection;
 using PortingAssistant.Client.Common.Utils;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using Serilog.Core;
+
 
 namespace PortingAssistant.Client.CLI
 
@@ -26,12 +30,20 @@ namespace PortingAssistant.Client.CLI
             PortingAssistantCLI cli = new PortingAssistantCLI();
             cli.HandleCommand(args);
 
+            var levelSwitch = new LoggingLevelSwitch();
+            levelSwitch.MinimumLevel = cli.MinimumLoggingLevel;
+
             var logConfiguration = new LoggerConfiguration().Enrich.FromLogContext()
-                .MinimumLevel.Debug()
+                .MinimumLevel.ControlledBy(levelSwitch)
                 .WriteTo.Console();
 
             var assemblyPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             var telemetryConfiguration = JsonSerializer.Deserialize<TelemetryConfiguration>(File.ReadAllText(Path.Combine(assemblyPath, "PortingAssistantTelemetryConfig.json")));
+            if (!string.IsNullOrEmpty(cli.EgressPoint))
+            {
+                telemetryConfiguration.InvokeUrl = cli.EgressPoint;
+                Console.WriteLine($"Change endpoint to {telemetryConfiguration.InvokeUrl}");
+            }
 
             var configuration = new PortingAssistantConfiguration();
             var roamingFolder = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -77,12 +89,14 @@ namespace PortingAssistant.Client.CLI
                         ? new AnalyzerSettings
                         {
                             IgnoreProjects = cli.IgnoreProjects,
-                            TargetFramework = cli.Target
+                            TargetFramework = cli.Target,
+                            UseGenerator = cli.UseGenerator
                         }
                         : new AnalyzerSettings
                         {
                             IgnoreProjects = new List<string>(),
-                            TargetFramework = cli.Target
+                            TargetFramework = cli.Target,
+                            UseGenerator = cli.UseGenerator
                         };
 
                     var startTime = DateTime.Now;
@@ -91,7 +105,8 @@ namespace PortingAssistant.Client.CLI
                     // Assess solution
                     if (solutionSettings.UseGenerator)
                     {
-                        analyzeResults = AnalyzeSolutionGenerator(portingAssistantClient, cli.SolutionPath, solutionSettings);
+                        var cancellationTokenSource = new CancellationTokenSource();
+                        analyzeResults = AnalyzeSolutionGenerator(portingAssistantClient, cli.SolutionPath, solutionSettings, cancellationTokenSource.Token);
                     }
                     else
                     {
@@ -189,19 +204,21 @@ namespace PortingAssistant.Client.CLI
             }
         }
 
-        private static async Task<SolutionAnalysisResult> AnalyzeSolutionGenerator(
+        public static async Task<SolutionAnalysisResult> AnalyzeSolutionGenerator(
             IPortingAssistantClient portingAssistantClient, 
             string solutionPath, 
-            AnalyzerSettings solutionSettings)
+            AnalyzerSettings solutionSettings,
+            CancellationToken cancellationToken = default)
         {
             try 
             {
                 var projectAnalysisResults = new List<ProjectAnalysisResult>();
                 var failedProjects = new List<string>();
-                var projectAnalysisResultEnumerator = portingAssistantClient.AnalyzeSolutionGeneratorAsync(solutionPath, solutionSettings).GetAsyncEnumerator();
+                var projectAnalysisResultEnumerator = portingAssistantClient.AnalyzeSolutionGeneratorAsync(solutionPath, solutionSettings).GetAsyncEnumerator(cancellationToken);
 
                 while (await projectAnalysisResultEnumerator.MoveNextAsync().ConfigureAwait(false))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var result = projectAnalysisResultEnumerator.Current;
                     projectAnalysisResults.Add(result);
 
@@ -237,6 +254,10 @@ namespace PortingAssistant.Client.CLI
                     ProjectAnalysisResults = projectAnalysisResults
                 };
             } 
+            catch (TaskCanceledException ex)
+            {
+                throw new PortingAssistantException($"Analyze solution Cancelled {solutionPath}", ex);
+            }
             catch (Exception ex) 
             {
                 throw new PortingAssistantException($"Cannot Analyze solution {solutionPath}", ex);

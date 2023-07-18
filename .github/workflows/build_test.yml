@@ -27,6 +27,10 @@ jobs:
           echo "Added aws secret templates"
           git secrets --scan -r ../
           echo "Repository scan completed"
+    - name: Get Version Info
+      uses: dotnet/nbgv@master
+      with:
+        setAllVars: true
     - name: Setup .NET Versions
       uses: actions/setup-dotnet@v1
       with:
@@ -34,6 +38,7 @@ jobs:
           3.1.x
           5.0.x
           6.0.x
+          7.0.x
     - name: Install dependencies
       run: dotnet restore
     - name: Build
@@ -49,6 +54,95 @@ jobs:
         "aws_secret_access_key = $env:aws_secret_access_key" | Out-File -FilePath "~\.aws\credentials" -Append
     - name: Test
       run: dotnet test --configuration Release --no-restore --verbosity normal
+
+  benchmark-and-regression-check:
+    runs-on: windows-latest
+    steps: 
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: Setup .NET Versions
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 7.0.x
+    - name: Get Version Info
+      uses: dotnet/nbgv@master
+      with:
+        setAllVars: true
+    - name: Install dependencies
+      run: dotnet restore
+    - name: Install .NET Framework 4.7.2
+      run: |
+        iwr https://go.microsoft.com/fwlink/?linkid=874338 -OutFile installer.exe; 
+        Start-Process .\\installer.exe -argumentlist "/passive /norestart" -wait; 
+        Write-Host Installed .NET 4.7.2
+    - name: Download Test Projects
+      run: |
+        if (!(test-path -PathType Container c:\\temp)){ mkdir c:\\temp}
+        iwr https://github.com/marknfawaz/TestProjects/archive/refs/heads/master.zip -OutFile c:\\temp\\master.zip
+        Expand-Archive -Path c:\\temp\\master.zip -DestinationPath c:\\temp\\
+        mv c:\\temp\\TestProjects-master\\net472\\OwinExtraAPI c:\\temp\\OwinExtraAPI
+        mkdir c:\\temp\\OwinExtraAPI_output
+        mv c:\\temp\\TestProjects-master\\net472\\IonicZipSample c:\\temp\\IonicZipSample
+        mkdir c:\\temp\\IonicZipSample_output
+        Write-Host Final Temp Dir: 
+        dir c:\\temp
+    - name: Install Benchmark Tool
+      run: |
+        dotnet new tool-manifest
+        dotnet tool install --add-source ${{ secrets.TUXNET_BENCHMARK_NUGET_FEED }} BenchmarkDotnetCliTool
+    - name: Run Benchmark and check for Regression 
+      run: |
+        # baseline is the most recent git tag
+        $baseline="static-baseline"
+        $tag="v${{env.NBGV_MajorMinorVersion}}"
+        $threshold=10
+        dotnet benchmark run local managed src/PortingAssistant.Client/PortingAssistant.Client.CLI.csproj -o .\benchmark --tag $tag --baseline $baseline --threshold $threshold -c benchmark-targets.json
+    - name: Archive Benchmark results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: .\benchmark\*
+
+  deploy:
+    # after trailing tuxnet benchmark tool, add 'benchmark-and-regression-check' to this array
+    # so deploy will block if perf regression detected.
+    needs: [build]
+    runs-on: windows-latest
+    env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: Check for secrets leak on the repo
+      run: |
+          git clone https://github.com/awslabs/git-secrets.git target
+          cd target
+          ./install.ps1
+          echo "Git-secrets installation completed"
+          git secrets --register-aws --global
+          echo "Added aws secret templates"
+          git secrets --scan -r ../
+          echo "Repository scan completed"
+    - name: Get Version Info
+      uses: dotnet/nbgv@master
+      with:
+        setAllVars: true
+    - name: Install dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+    - name: Configure credentials to default profile
+      env:
+        aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY }}
+        aws_secret_access_key: ${{ secrets.AWS_SECRET_KEY }}
+      run: |
+        mkdir "~\.aws"
+        "[default]" | Out-File -FilePath "~\.aws\credentials"
+        "aws_access_key_id = $env:aws_access_key_id" | Out-File -FilePath "~\.aws\credentials" -Append
+        "aws_secret_access_key = $env:aws_secret_access_key" | Out-File -FilePath "~\.aws\credentials" -Append
     - name: Pack
       if: ${{ github.event_name == 'push' }}
       run: |
@@ -81,4 +175,9 @@ jobs:
         }
         $uploadLink = 's3://aws.portingassistant.dotnet.download/nuget/flatcontainer/portingassistant.client.cli/' + $version + '/'
         Echo $uploadLink
-        aws s3 cp ./dist/PortingAssistant.Client.CLI.exe $uploadLink
+        aws s3 cp ./dist/PortingAssistant.Client.CLI.exe $uploadLink    
+    - name: "Push tag"
+      if: ${{ github.event_name == 'push' }}
+      uses: EndBug/latest-tag@latest
+      with:
+        tag-name: "v${{env.NBGV_MajorMinorVersion}}"

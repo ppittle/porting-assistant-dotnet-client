@@ -40,8 +40,10 @@
     <ProjectReference Include="..\..\src\PortingAssistant.Client.Analysis\PortingAssistant.Client.Analysis.csproj" />
     <ProjectReference Include="..\..\src\PortingAssistant.Client.Client\PortingAssistant.Client.Client.csproj" />
     <ProjectReference Include="..\..\src\PortingAssistant.Client.Telemetry\PortingAssistant.Client.Telemetry.csproj" />
+    <ProjectReference Include="..\..\src\PortingAssistant.Client\PortingAssistant.Client.CLI.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Folder Include="Model\" />
     <Folder Include="TestProjects\" />
   </ItemGroup>
 
